@@ -1,86 +1,106 @@
-private void csvSalesOutDataToXLSX() {
+void processMessage(String message, Acknowledgement ack) {
 
-&nbsp;   try (XSSFWorkbook workBook = new XSSFWorkbook()) {
+&nbsp;   //todo
 
-&nbsp;       File fileSales = new File(ECPBatchConstant.ECP\_SALES\_OUTPUT);
+&nbsp;   try {
 
-&nbsp;       String csvSaleFileAddress = fileSales.toPath().toString();
+&nbsp;       log.info("processing message:{}", message);
 
-&nbsp;       String xlsxFileAddress = "ecp\_batch\_" + LocalDate.now().getMonthValue() + LocalDate.now().getDayOfMonth()
+&nbsp;       JsonNode root = objectMapper.readTree(message);
 
-&nbsp;               + LocalDate.now().getYear() + ".xlsx";
+&nbsp;       JsonNode records = root.path("Records");
 
 &nbsp;       
 
-&nbsp;       XSSFSheet sheet = workBook.createSheet("sheet1");
+&nbsp;       if (!records.isArray() || records.size() == 0) { //records.isEmpty()
 
-&nbsp;       String currentLine = null;
+&nbsp;           log.warn("No records\[] found in s3 event; skipping message{}", message);
 
-&nbsp;       int RowNum = 0;
+&nbsp;           return;
 
-&nbsp;       try (BufferedReader br = new BufferedReader(new FileReader(csvSaleFileAddress))) {
+&nbsp;       }
 
-&nbsp;           while ((currentLine = br.readLine()) != null) {
+&nbsp;       
 
-&nbsp;               String str\[] = currentLine.split("\\\\|");
+&nbsp;       JsonNode rec = records.get(0);
 
-&nbsp;               RowNum++;
+&nbsp;       String bucket = rec.path("s3").path("bucket").path("name").asText(null);
 
-&nbsp;               XSSFRow currentRow = sheet.createRow(RowNum);
+&nbsp;       String bucket = rec.path("bucket").path("name").asText();
 
-&nbsp;               for (int i = 0; i < str.length; i++) {
+&nbsp;       String keyEnc = rec.path("s3").path("object").path("key").asText();
 
-&nbsp;                   currentRow.createCell(i).setCellValue(str\[i]);
+&nbsp;       if (bucket == null || keyEnc == null) {
 
-&nbsp;               }
+&nbsp;           log.warn("missing bucket/key in s3event;skipping message{}", message);
+
+&nbsp;           return;
+
+&nbsp;       }
+
+&nbsp;       
+
+&nbsp;       String key = URLDecoder.decode(keyEnc, StandardCharsets.UTF\_8);
+
+&nbsp;       log.info("Event object:s3://{}/{}", bucket, keyEnc);
+
+&nbsp;       
+
+&nbsp;       System.setProperty("ECP\_INPUTKEY", keyEnc);
+
+&nbsp;       System.setProperty("INPUT\_BUCKET", bucket);
+
+&nbsp;       
+
+&nbsp;       JobParameters params = new JobParametersBuilder()
+
+&nbsp;               .addString("jobId", UUID.randomUUID().toString())
+
+&nbsp;               .addLong("timestamp", System.currentTimeMillis()).toJobParameters();
+
+&nbsp;       
+
+&nbsp;       if(jobLauncher != null) {
+
+&nbsp;           
+
+&nbsp;           JobExecution launched = jobLauncher.run(ecpBatch, params);
+
+&nbsp;           
+
+&nbsp;           JobExecution finalState = waitForCompletion(launched.getId());
+
+&nbsp;           
+
+&nbsp;           if (finalState.getStatus() == BatchStatus.COMPLETED) {
+
+&nbsp;               ack.acknowledge();
+
+&nbsp;               log.info("Job Completed.deleted SQS message {}", message);
+
+&nbsp;           } else {
+
+&nbsp;               log.warn("Job ended with status {}.keeping message {} for retry.", finalState.getStatus(), message);
 
 &nbsp;           }
 
-&nbsp;       } catch (FileNotFoundException e) {
-
-&nbsp;           LOG.error("Error Reading the sales out csv file.", e);
-
 &nbsp;       }
 
 &nbsp;       
 
-&nbsp;       FileOutputStream fileOutputStream = new FileOutputStream(xlsxFileAddress);
+&nbsp;   } catch (Exception ex) {
 
-&nbsp;       workBook.write(fileOutputStream);
+&nbsp;       log.error("Failed handling message{}.leaving it for retry.", message, ex);
 
-&nbsp;       workBook.close();
+&nbsp;   }
 
-&nbsp;       fileOutputStream.close();
+&nbsp;   try {
 
-&nbsp;       
+&nbsp;       Thread.sleep(1000);
 
-&nbsp;       File excelSaleFile = new File(xlsxFileAddress);
+&nbsp;   } catch (InterruptedException e) {
 
-&nbsp;       InputStream targetStreamExcelSale = new FileInputStream(excelSaleFile);
-
-&nbsp;       try {
-
-&nbsp;           s3Service.write(this.outputBucketName, xlsxFileAddress, targetStreamExcelSale);
-
-&nbsp;           // deleting temporary copy of output files.
-
-&nbsp;           Files.deleteIfExists(excelSaleFile.toPath());
-
-&nbsp;           Files.deleteIfExists(Paths.get(ECPBatchConstant.ECP\_FEED\_FILE));
-
-&nbsp;           Files.deleteIfExists(new File(ECPBatchConstant.ECP\_BASE\_OUTPUT).toPath());
-
-&nbsp;           Files.deleteIfExists(fileSales.toPath());
-
-&nbsp;       } catch (AmazonServiceException e) {
-
-&nbsp;           LOG.error("Exception occurred while writing xlsx to S3", e);
-
-&nbsp;       }
-
-&nbsp;   } catch (Exception e) {
-
-&nbsp;       LOG.error("Exception occurred while converting file to xlsx.", e);
+&nbsp;       Thread.currentThread().interrupt();
 
 &nbsp;   }
 
