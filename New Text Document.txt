@@ -11,7 +11,6 @@ void processMessage(String message, Acknowledgement ack) {
         }
         
         JsonNode rec = records.get(0);
-        String bucket = rec.path("s3").path("bucket").path("name").asText(null);
         String bucket = rec.path("bucket").path("name").asText();
         String keyEnc = rec.path("s3").path("object").path("key").asText();
         if (bucket == null || keyEnc == null) {
