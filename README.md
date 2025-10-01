@@ -1,6 +1,6 @@
 private void csvSalesOutDataToXLSX() {
 
-&nbsp;   try {
+&nbsp;   try (XSSFWorkbook workBook = new XSSFWorkbook()) {
 
 &nbsp;       File fileSales = new File(ECPBatchConstant.ECP\_SALES\_OUTPUT);
 
@@ -12,77 +12,69 @@ private void csvSalesOutDataToXLSX() {
 
 &nbsp;       
 
-&nbsp;       XSSFWorkbook workBook = new XSSFWorkbook();
+&nbsp;       XSSFSheet sheet = workBook.createSheet("sheet1");
 
-&nbsp;       try {
+&nbsp;       String currentLine = null;
 
-&nbsp;           XSSFSheet sheet = workBook.createSheet("sheet1");
+&nbsp;       int RowNum = 0;
 
-&nbsp;           String currentLine = null;
+&nbsp;       try (BufferedReader br = new BufferedReader(new FileReader(csvSaleFileAddress))) {
 
-&nbsp;           int RowNum = 0;
+&nbsp;           while ((currentLine = br.readLine()) != null) {
 
-&nbsp;           try (BufferedReader br = new BufferedReader(new FileReader(csvSaleFileAddress))) {
+&nbsp;               String str\[] = currentLine.split("\\\\|");
 
-&nbsp;               while ((currentLine = br.readLine()) != null) {
+&nbsp;               RowNum++;
 
-&nbsp;                   String str\[] = currentLine.split("\\\\|");
+&nbsp;               XSSFRow currentRow = sheet.createRow(RowNum);
 
-&nbsp;                   RowNum++;
+&nbsp;               for (int i = 0; i < str.length; i++) {
 
-&nbsp;                   XSSFRow currentRow = sheet.createRow(RowNum);
-
-&nbsp;                   for (int i = 0; i < str.length; i++) {
-
-&nbsp;                       currentRow.createCell(i).setCellValue(str\[i]);
-
-&nbsp;                   }
+&nbsp;                   currentRow.createCell(i).setCellValue(str\[i]);
 
 &nbsp;               }
 
-&nbsp;           } catch (FileNotFoundException e) {
-
-&nbsp;               LOG.error("Error Reading the sales out csv file.", e);
-
 &nbsp;           }
 
-&nbsp;           FileOutputStream fileOutputStream = new FileOutputStream(xlsxFileAddress);
+&nbsp;       } catch (FileNotFoundException e) {
 
-&nbsp;           workBook.write(fileOutputStream);
+&nbsp;           LOG.error("Error Reading the sales out csv file.", e);
 
-&nbsp;           workBook.close();
+&nbsp;       }
 
-&nbsp;           fileOutputStream.close();
+&nbsp;       
 
-&nbsp;           
+&nbsp;       FileOutputStream fileOutputStream = new FileOutputStream(xlsxFileAddress);
 
-&nbsp;           File excelSaleFile = new File(xlsxFileAddress);
+&nbsp;       workBook.write(fileOutputStream);
 
-&nbsp;           InputStream targetStreamExcelSale = new FileInputStream(excelSaleFile);
+&nbsp;       workBook.close();
 
-&nbsp;           try {
+&nbsp;       fileOutputStream.close();
 
-&nbsp;               s3Service.write(this.outputBucketName, xlsxFileAddress, targetStreamExcelSale);
+&nbsp;       
 
-&nbsp;               // deleting temporary copy of output files.
+&nbsp;       File excelSaleFile = new File(xlsxFileAddress);
 
-&nbsp;               Files.deleteIfExists(excelSaleFile.toPath());
+&nbsp;       InputStream targetStreamExcelSale = new FileInputStream(excelSaleFile);
 
-&nbsp;               Files.deleteIfExists(Paths.get(ECPBatchConstant.ECP\_FEED\_FILE));
+&nbsp;       try {
 
-&nbsp;               Files.deleteIfExists(new File(ECPBatchConstant.ECP\_BASE\_OUTPUT).toPath());
+&nbsp;           s3Service.write(this.outputBucketName, xlsxFileAddress, targetStreamExcelSale);
 
-&nbsp;               Files.deleteIfExists(fileSales.toPath());
+&nbsp;           // deleting temporary copy of output files.
 
-&nbsp;           } catch (AmazonServiceException e) {
+&nbsp;           Files.deleteIfExists(excelSaleFile.toPath());
 
-&nbsp;               LOG.error("Exception occurred while writing xlsx to S3", e);
+&nbsp;           Files.deleteIfExists(Paths.get(ECPBatchConstant.ECP\_FEED\_FILE));
 
-&nbsp;           }
+&nbsp;           Files.deleteIfExists(new File(ECPBatchConstant.ECP\_BASE\_OUTPUT).toPath());
 
-&nbsp;       } finally {
+&nbsp;           Files.deleteIfExists(fileSales.toPath());
 
-&nbsp;           workBook.close();
+&nbsp;       } catch (AmazonServiceException e) {
+
+&nbsp;           LOG.error("Exception occurred while writing xlsx to S3", e);
 
 &nbsp;       }
 
