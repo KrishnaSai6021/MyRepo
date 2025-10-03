@@ -108,6 +108,9 @@ public class SqsMessageListener {
                 }
             }
 
+        }catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            log.error("Failed handling message{}.leaving it for retry.", message, ex);
         }catch (Exception ex) {
             log.error("Failed handling message{}.leaving it for retry.", message, ex);
         }
