@@ -183,12 +183,16 @@ public class EcpBatchConfiguration
 
 	@Bean(name = "ecpBatch")
 	public Job ecpBatch(JobRepository jobRepository,
-						PlatformTransactionManager transactionManager)
+						PlatformTransactionManager transactionManager,
+                        Step ecpBatchStep1,
+                        Step ecpBatchStep2
+                        )
 	{
 		final Job job = new JobBuilder("ecpBatch", jobRepository)
 				.listener(this.getJobExecutionListener())
-				.start(this.ecpBatchStep1(jobRepository, transactionManager))
-				.next(this.ecpBatchStep2(jobRepository, transactionManager)).build();
+				.start(ecpBatchStep1)
+				.next(ecpBatchStep2)
+                .build();
 		return job;
 	}
 
@@ -199,11 +203,11 @@ public class EcpBatchConfiguration
 	 * @param transactionManager
 	 * @return
 	 */
-	@Bean
-	public Step ecpBatchStep1(JobRepository jobRepository, PlatformTransactionManager transactionManager)
+	@Bean(name = "ecpBatchStep1")
+	public Step ecpBatchStep1(JobRepository jobRepository, PlatformTransactionManager transactionManager, FirstStepTasklet firstStepTasklet)
 	{
 		final Step step = new StepBuilder("ecpBatchStep1", jobRepository)
-				.tasklet(this.firstStepTasklet(), transactionManager).build();
+				.tasklet(firstStepTasklet, transactionManager).build();
 		return step;
 	}
 
@@ -217,7 +221,7 @@ public class EcpBatchConfiguration
 	@StepScope
 	public FirstStepTasklet firstStepTasklet(@Value("#{jobParameters['bucket']}") String bucket, @Value("#{jobParameters['key']}") String key)
 	{
-		this.copyFeedFiletoLocal();
+		this.copyFeedFiletoLocal(bucket, key);
 		return new FirstStepTasklet(ECPBatchConstant.ECP_FEED_FILE);
 	}
 
@@ -256,7 +260,7 @@ public class EcpBatchConfiguration
 	/**
 	 * Main processing Step.
 	 */
-	@Bean
+	@Bean(name = "ecpBatchStep2")
 	public Step ecpBatchStep2(JobRepository jobRepository, PlatformTransactionManager transactionManager)
 	{
 		final int chunkCommitInteval = Integer.parseInt(
