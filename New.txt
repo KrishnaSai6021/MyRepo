@@ -1,140 +1,594 @@
-package com.fmr.batch.ecp.listener;
+/*
+ * Copyright 2017, FMR LLC.
+ * All Rights Reserved.
+ * Fidelity Confidential Information
+ */
+package com.fmr.batch.ecp.config;
 
-import com.fmr.batch.ecp.service.S3Service;
-import io.awspring.cloud.sqs.annotation.SqsListener;
-import io.awspring.cloud.sqs.listener.acknowledgement.Acknowledgement;
-import org.codehaus.jackson.JsonNode;
-import org.codehaus.jackson.map.ObjectMapper;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.batch.core.*;
-import org.springframework.batch.core.explore.JobExplorer;
-import org.springframework.batch.core.job.builder.JobBuilder;
-import org.springframework.batch.core.launch.JobLauncher;
-import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.Job;
 import org.springframework.batch.core.JobParameters;
 import org.springframework.batch.core.JobParametersBuilder;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.configuration.annotation.StepScope;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.JobLauncher;
+import org.springframework.batch.core.launch.support.TaskExecutorJobLauncher;
 import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.repository.support.JobRepositoryFactoryBean;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.FlatFileItemWriter;
+import org.springframework.batch.item.file.mapping.BeanWrapperFieldSetMapper;
+import org.springframework.batch.item.file.mapping.DefaultLineMapper;
+import org.springframework.batch.item.file.separator.DefaultRecordSeparatorPolicy;
+import org.springframework.batch.item.file.transform.BeanWrapperFieldExtractor;
+import org.springframework.batch.item.file.transform.DelimitedLineAggregator;
+import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
+import org.springframework.batch.support.transaction.ResourcelessTransactionManager;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-import org.springframework.batch.core.Job;
-import org.springframework.messaging.Message;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.PropertySource;
+import org.springframework.context.support.PropertySourcesPlaceholderConfigurer;
+import org.springframework.core.env.Environment;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseBuilder;
+import org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseType;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.services.s3.model.S3Object;
+import com.fmr.ast.platform.common.client.v2.support.OAuth2Support;
+import com.fmr.batch.ecp.constant.ECPBatchConstant;
+import com.fmr.batch.ecp.constant.ExecutionResultType;
+import com.fmr.batch.ecp.domain.EcpBatchDomain;
+import com.fmr.batch.ecp.domain.EcpInputRecord;
+import com.fmr.batch.ecp.domain.EcpOutputRecordBase;
+import com.fmr.batch.ecp.domain.EcpOutputRecordSalesForce;
+import com.fmr.batch.ecp.listener.EcpJobExecutionListener;
+import com.fmr.batch.ecp.listener.EcpStepExecutionListener;
+import com.fmr.batch.ecp.operation.AccountGrantsOperation;
+import com.fmr.batch.ecp.operation.AggregatedOutputOperation;
+import com.fmr.batch.ecp.operation.BlackScholesCalculatorOperation;
+import com.fmr.batch.ecp.operation.CPPartyIdentityOperation;
+import com.fmr.batch.ecp.operation.ClientsPlansOperation;
+import com.fmr.batch.ecp.operation.FastQuoteOperation;
+import com.fmr.batch.ecp.operation.IdentityResolverOperation;
+import com.fmr.batch.ecp.operation.Operation;
+import com.fmr.batch.ecp.operation.PreparationForOutputRecord;
+import com.fmr.batch.ecp.processor.EcpBatchProcessor;
+import com.fmr.batch.ecp.processor.FirstStepTasklet;
+import com.fmr.batch.ecp.processor.InputDataHolder;
+import com.fmr.batch.ecp.reader.EcpBatchReader;
+import com.fmr.batch.ecp.reader.StepTwoReader;
+import com.fmr.batch.ecp.service.S3Service;
+import com.fmr.batch.ecp.util.BatchConstants;
+import com.fmr.batch.ecp.util.DateUtil;
+import com.fmr.batch.ecp.util.SSLSetup;
+import com.fmr.batch.ecp.writer.ECPFileHeaderCallback;
+import com.fmr.batch.ecp.writer.EcpBatchWriter;
 import org.springframework.transaction.PlatformTransactionManager;
 
-
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-
-import java.util.UUID;
+import javax.sql.DataSource;
 
 
-@Component
-public class SqsMessageListener {
-    private static final Logger log = LoggerFactory.getLogger(SqsMessageListener.class);
+@Configuration
+@ConfigurationProperties(prefix = "yaml")
+@PropertySource(value = "classpath:application.yml", factory = YamlPropertySourceFactory.class)
+@Import(WebServiceClientConfig.class)
+@ComponentScan(basePackages = { "com.fmr.batch.ecp" })
+/**
+ * The EcpBatchConfiguration.
+ */
+public class EcpBatchConfiguration
+{
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+	/** The Constant LOG. */
+	private static final Logger LOG = LoggerFactory.getLogger(EcpBatchConfiguration.class);
 
-    @Value("${aws.sqs.queue-url}")
-    private String queueUrl;
+	/** The Environment property manager. */
+	@Autowired
+	private Environment env;
 
-    @Value("${aws.sqs.max-messages:1}")
-    private int maxMessages;
+	@Autowired
+	private S3Service s3Service;
 
-    @Value("${aws.sqs.visibility-seconds:180}")
-    private int visibilitySeconds;
+	@Value("${aws.s3.input-bucket-name}")
+	private String inputBucketName;
 
-    @Autowired
-    private  JobLauncher jobLauncher;
+	@Value("${aws.s3.inputKey}")
+	private String inputKey;
 
-    @Autowired
-    private  JobExplorer jobExplorer;
+	@Value("${oauth.host}")
+	private String oAuthHost;
 
-    @Autowired
-    private Job ecpBatch;
+	/** The clientId. */
+	@Value("${oauth.clientId}")
+	private String clientId;
 
-    @SqsListener("${aws.sqs.queue-name}")
-    public void receiveMessage(Message<String> message, Acknowledgement ack) {
-        try {
+	/** The clientSecret. */
+	@Value("${oauth.clientSecret}")
+	private String clientSecret;
 
-            String payload = message.getPayload();
-            log.info("Received message:{}", payload);
-            processMessage(payload, ack);
+	/**
+	 * The Constructor.
+	 */
+	public EcpBatchConfiguration()
+	{
+		super();
+	}
 
-            log.info("Message processed successfully:{}", payload);
+	/**
+	 * This method is used to instantiate the property source place holder to read the properties
+	 * from application.yml.
+	 *
+	 * @return PropertySourcesPlaceholderConfigurer
+	 */
+	@Bean
+	public static PropertySourcesPlaceholderConfigurer propertySourcesPlaceholderConfigurer()
+	{
+		return new PropertySourcesPlaceholderConfigurer();
+	}
 
-        } catch (Exception e) {
-            log.error("SQS error in receiveMessage", e);
-        }
-    }
+	/**
+	 * The SSLSetup.
+	 * @return SSLSetup
+	 */
+	@Bean
+	public static SSLSetup sslSetup()
+	{
+		return new SSLSetup();
+	}
 
-    void processMessage(String message, Acknowledgement ack) {
-        try {
-            log.info("processing message:{}", message);
-            JsonNode root = objectMapper.readTree(message);
-            JsonNode records = root.path("Records");
+	@Bean(name = "ecpJobExecutionListener")
+	public EcpJobExecutionListener getJobExecutionListener()
+	{
+		return new EcpJobExecutionListener();
+	}
 
-            if (!records.isArray() || records.size() == 0) {
-                log.warn("No records[] found in s3 event; skipping message{}", message);
-                return;
-            }
-            JsonNode rec = records.get(0);
-            String bucket = rec.path("bucket").path("name").asText();
-            String keyEnc = rec.path("s3").path("object").path("key").asText();
-            if (bucket == null || keyEnc == null) {
-                log.warn("missing bucket/key in s3event;skipping message{}", message);
-                return;
-            }
-            String Key = URLDecoder.decode(keyEnc, StandardCharsets.UTF_8);
-            log.info("Event object:s3://{}/{}", bucket, keyEnc);
+	@Bean(name = "ecpStepExecutionListener")
+	public EcpStepExecutionListener getStepExecutionListener()
+	{
+		return new EcpStepExecutionListener();
+	}
 
-            System.setProperty("ECP_INPUTKEY", keyEnc);
-            System.setProperty("INPUT_BUCKET", bucket);
+	@Bean
+	public OAuth2Support oAuth2Support()
+	{
+		final OAuth2Support oAuth2Support = new OAuth2Support();
+		oAuth2Support.setOauthAppId("");
+		oAuth2Support.setOauthAppPassword("");
+		oAuth2Support.setOauthAuthorizationHost(this.oAuthHost);
+		oAuth2Support.setOauthClientId(this.clientId);
+		oAuth2Support.setOauthClientSecret(this.clientSecret);
+		return oAuth2Support;
+	}
 
-           
-            if(jobLauncher != null) {
-                 JobParameters params = new JobParametersBuilder()
-                    .addString("jobId", String.valueOf(System.currentTimeMillis()))
-                    .addString("RUN_TYPE_CODES", "hsa").toJobParameters()
-                    .addString("bucket", bucket)
-                    .addString("key", key)
-                    .toJobParameters();
+	@Bean(name = "ecpBatch")
+	public Job ecpBatch(JobRepository jobRepository,
+						PlatformTransactionManager transactionManager)
+	{
+		final Job job = new JobBuilder("ecpBatch", jobRepository)
+				.listener(this.getJobExecutionListener())
+				.start(this.ecpBatchStep1(jobRepository, transactionManager))
+				.next(this.ecpBatchStep2(jobRepository, transactionManager)).build();
+		return job;
+	}
 
-                JobExecution launched = jobLauncher.run(ecpBatch, params);
+	/**
+	 * Step1 of ECP Batch
+	 *
+	 * @param jobRepository
+	 * @param transactionManager
+	 * @return
+	 */
+	@Bean
+	public Step ecpBatchStep1(JobRepository jobRepository, PlatformTransactionManager transactionManager)
+	{
+		final Step step = new StepBuilder("ecpBatchStep1", jobRepository)
+				.tasklet(this.firstStepTasklet(), transactionManager).build();
+		return step;
+	}
 
-                JobExecution finalState = waitForCompletion(launched.getId());
+	@Bean
+	public InputDataHolder inputDataHolder()
+	{
+		return new InputDataHolder();
+	}
 
-                if (finalState.getStatus() == BatchStatus.COMPLETED) {
-                    ack.acknowledge();
-                    log.info("Job Completed. Deleted SQS message {}", message);
-                } else {
-                    log.warn("Job ended with status {}.keeping message {} for retry.", finalState.getStatus(), message);
-                }
-            }
-        }catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            log.error("Failed handling message{}.leaving it for retry.", message, ex);
-        }catch (Exception ex) {
-            log.error("Failed handling message{}.leaving it for retry.", message, ex);
-        }
-        try {
-            Thread.sleep(1000);
+	@Bean
+	@StepScope
+	public FirstStepTasklet firstStepTasklet(@Value("#{jobParameters['bucket']}") String bucket, @Value("#{jobParameters['key']}") String key)
+	{
+		this.copyFeedFiletoLocal();
+		return new FirstStepTasklet(ECPBatchConstant.ECP_FEED_FILE);
+	}
 
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-    private JobExecution waitForCompletion(Long executionId) throws InterruptedException {
-        while(true){
-            JobExecution current = jobExplorer.getJobExecution(executionId);
-            if(current == null){
-                log.warn("JobExecution{} not found in JobExplorer;breaking.",executionId);
-                return new JobExecution(executionId);
-            }
-            if(!current.isRunning()){
-                return current;
-            }
-            Thread.sleep(1000L);
-        }
-    }
-}Testing 1
+	private void copyFeedFiletoLocal(String inputBucket, String inputKey) {
+
+		S3Object s3 = null;
+		String line;
+		BufferedReader reader = null;
+		BufferedWriter writer;
+		try {
+			s3 = s3Service.read(inputBucket, inputKey);
+		} catch (AmazonServiceException e) {
+			LOG.error("Error reading feed file from s3.", e.getCause());
+		} catch (Exception e) {
+			LOG.error("Error reading feed file from s3 bucket.", e.getCause());
+		}
+
+		try {
+			//local.
+			reader = new BufferedReader(new InputStreamReader(s3.getObjectContent()));
+			writer = new BufferedWriter(new FileWriter(ECPBatchConstant.ECP_FEED_FILE));
+
+			while ((line = reader.readLine()) != null) {
+				writer.write(line);
+				writer.newLine();
+			}
+			reader.close();
+			writer.close();
+
+		} catch (IOException e) {
+			LOG.error("Error while reading feed file contents from S3 and writing locally.", e);
+		}
+
+	}
+
+	/**
+	 * Main processing Step.
+	 */
+	@Bean
+	public Step ecpBatchStep2(JobRepository jobRepository, PlatformTransactionManager transactionManager)
+	{
+		final int chunkCommitInteval = Integer.parseInt(
+				this.env.getRequiredProperty("ecpBatch.chunkCommitInterval"));
+
+		final int throttleLimit = Integer.parseInt(
+				this.env.getRequiredProperty("ecpBatch.throttleLimit"));
+
+		final Step step = new StepBuilder("ecpBatchStep2", jobRepository)
+				.<EcpBatchDomain, EcpBatchDomain> chunk(chunkCommitInteval, transactionManager)
+				.reader(this.stepTwoReader())
+				.processor(this.processor())
+				.writer(this.writer())
+				.listener(this.getStepExecutionListener())
+				.taskExecutor(this.taskExecutor()).throttleLimit(throttleLimit).build();
+		return step;
+	}
+
+	@Bean
+	public TaskExecutor taskExecutor()
+	{
+		final ThreadPoolTaskExecutor taskExecutor = new ThreadPoolTaskExecutor();
+		taskExecutor.setCorePoolSize(
+				Integer.parseInt(this.env.getRequiredProperty("ecpBatch.taskExecutor.threadCorePoolSize")));
+		taskExecutor.setMaxPoolSize(
+				Integer.parseInt(this.env.getRequiredProperty("ecpBatch.taskExecutor.threadMaxPoolSize")));
+		taskExecutor
+				.setQueueCapacity(Integer.parseInt(
+						this.env.getRequiredProperty("ecpBatch.taskExecutor.queueCapacity")));
+		return taskExecutor;
+	}
+
+	private void passODate(final LocalDate passDate) {
+		DateUtil.setODate(passDate);
+	}
+
+	@Bean
+	@StepScope
+	public EcpBatchReader reader()
+	{
+		final EcpBatchReader reader = new EcpBatchReader();
+		reader.setInputFilePath(ECPBatchConstant.ECP_FEED_FILE);
+		return reader;
+	}
+
+	@Bean
+	@StepScope
+	public StepTwoReader stepTwoReader()
+	{
+		StepTwoReader reader =  new StepTwoReader();
+		return reader;
+	}
+
+
+	@StepScope
+	@Bean
+	@Qualifier("ecpInputFileReader")
+	public FlatFileItemReader<EcpInputRecord> ecpInputFileReader()
+	{
+		final FlatFileItemReader<EcpInputRecord> ecpInputFileReader = new FlatFileItemReader<>();
+		ecpInputFileReader.setResource(new FileSystemResource(ECPBatchConstant.ECP_FEED_FILE));
+		ecpInputFileReader.setLinesToSkip(0);
+
+		final BeanWrapperFieldSetMapper<EcpInputRecord> beanWrapperFieldSetMapper =
+				new BeanWrapperFieldSetMapper<>();
+		beanWrapperFieldSetMapper.setTargetType(EcpInputRecord.class);
+
+		final DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer("|");//TODO
+		tokenizer.setNames(new String[] {"branchName", "productCode", "mid"});//TODO
+		tokenizer.setStrict(false);
+
+		final DefaultLineMapper<EcpInputRecord> defaultLineMapper = new DefaultLineMapper<>();
+		defaultLineMapper.setLineTokenizer(tokenizer);
+		defaultLineMapper.setFieldSetMapper(beanWrapperFieldSetMapper);
+
+		ecpInputFileReader.setLineMapper(defaultLineMapper);
+		ecpInputFileReader.setRecordSeparatorPolicy(new DefaultRecordSeparatorPolicy());//TODO
+
+		return ecpInputFileReader;
+	}
+
+	/**
+	 * This method is used to instantiate the step scope processor (implements ItemProcessor).
+	 *
+	 * @return processor
+	 */
+	@StepScope
+	@Bean
+	public EcpBatchProcessor processor()
+	{
+		passODate(LocalDate.now());
+		final EcpBatchProcessor ecpProcessor = new EcpBatchProcessor();
+		List<Operation<EcpBatchDomain>> operationList = new ArrayList<>(6);
+		operationList.add(this.identityResolverOperation());
+		operationList.add(this.cpPartyIdentityOperation());
+		operationList.add(this.accountGrantsOperation());
+		operationList.add(this.fastQuoteOperation());
+		operationList.add(this.blackScholesCalculatorOperation());
+		operationList.add(this.preparationForOutputRecord());
+		operationList.add(this.aggregatedOutputOperation());
+		ecpProcessor.setOperationSeries(operationList);
+		return ecpProcessor;
+	}
+
+
+	@Bean
+	@StepScope
+	public EcpBatchWriter writer()
+	{
+		final EcpBatchWriter writer = new EcpBatchWriter();
+		return writer;
+	}
+
+	/**
+	 * Instantiates one ecpSuccessFileWriter bean.
+	 *
+	 * @return
+	 */
+	@StepScope
+	@Bean
+	@Qualifier("ecpSuccessFileWriter")
+	public FlatFileItemWriter<EcpOutputRecordBase> ecpSuccessFileWriter()
+	{
+		final FlatFileItemWriter<EcpOutputRecordBase> ecpSuccessFileWriter = this.createFlatFileWriter(ECPBatchConstant.TEMP_OUTPUT,
+				ExecutionResultType.SUCCESS);
+		return ecpSuccessFileWriter;
+	}
+
+	@StepScope
+	@Bean
+	@Qualifier("ecpSuccessSalesForceFileWriter")
+	public FlatFileItemWriter<EcpOutputRecordSalesForce> ecpSuccessSalesForceFileWriter()
+	{
+		final FlatFileItemWriter<EcpOutputRecordSalesForce> ecpSuccessFileWriter = this.createSalesforceFlatFileWriter(ECPBatchConstant.TEMP_OUTPUT,
+				ExecutionResultType.SUCCESS);
+		return ecpSuccessFileWriter;
+	}
+
+	@Bean
+	public CPPartyIdentityOperation cpPartyIdentityOperation()
+	{
+		return new CPPartyIdentityOperation();
+	}
+	@Bean
+	public ClientsPlansOperation clientsPlansOperation()
+	{
+		return new ClientsPlansOperation();
+	}
+
+	@Bean
+	public AccountGrantsOperation accountGrantsOperation()
+	{
+		return new AccountGrantsOperation();
+	}
+
+	@Bean
+	public FastQuoteOperation fastQuoteOperation()
+	{
+		return new FastQuoteOperation();
+	}
+
+	@Bean
+	public AggregatedOutputOperation aggregatedOutputOperation()
+	{
+		return new AggregatedOutputOperation();
+	}
+
+	@Bean
+	public BlackScholesCalculatorOperation blackScholesCalculatorOperation()
+	{
+		return new BlackScholesCalculatorOperation();
+	}
+
+	@Bean
+	public PreparationForOutputRecord preparationForOutputRecord()
+	{
+		return new PreparationForOutputRecord();
+	}
+
+	@Bean
+	public IdentityResolverOperation identityResolverOperation()
+	{
+		return new IdentityResolverOperation();
+	}
+
+	/**
+	 * Creates flat file writer.
+	 *
+	 * @param filePath
+	 *            the flat file path.
+	 * @param resultType
+	 *            the execution result type.
+	 * @return created flat file writer
+	 */
+	private FlatFileItemWriter<EcpOutputRecordBase> createFlatFileWriter(
+			final String filePath, final ExecutionResultType resultType) {
+		final FlatFileItemWriter<EcpOutputRecordBase> fileItemWriter = new FlatFileItemWriter<>();
+		fileItemWriter.setResource(new FileSystemResource(filePath + BatchConstants.OUTPUT_FILE_BASE + resultType.outputFilePostfix()));
+
+		fileItemWriter.setShouldDeleteIfExists(true);
+		fileItemWriter.setHeaderCallback(new ECPFileHeaderCallback(this.getHeader()));
+		final DelimitedLineAggregator<EcpOutputRecordBase> delLineAggregator = new DelimitedLineAggregator<>();
+		delLineAggregator.setDelimiter(ECPBatchConstant.PIPE);
+
+		final BeanWrapperFieldExtractor<EcpOutputRecordBase> fieldExtractor = new BeanWrapperFieldExtractor<>();
+		if(ExecutionResultType.SUCCESS.equals(resultType)){
+			fieldExtractor.setNames(new String[]{ECPBatchConstant.MID, ECPBatchConstant.STOCK,
+					ECPBatchConstant.STOCK_VOLATILITY, ECPBatchConstant.GRANT_DATE,
+					ECPBatchConstant.EXP_DATE, ECPBatchConstant.GRANT_TYPE,
+					ECPBatchConstant.GRANT_PRICE, ECPBatchConstant.VESTED_QTY,
+					ECPBatchConstant.ITM_VALUE, ECPBatchConstant.TIME_VALUE,
+					ECPBatchConstant.BLACK_SCHOLES_VALUE, ECPBatchConstant.ITM_PERCENT});
+		}
+		delLineAggregator.setFieldExtractor(fieldExtractor);
+		fileItemWriter.setLineAggregator(delLineAggregator);
+		return fileItemWriter;
+	}
+
+	/**
+	 * Creates flat file writer.
+	 *
+	 * @param filePath
+	 *            the flat file path.
+	 * @param resultType
+	 *            the execution result type.
+	 * @return created flat file writer
+	 */
+	private FlatFileItemWriter<EcpOutputRecordSalesForce> createSalesforceFlatFileWriter(
+			final String filePath, final ExecutionResultType resultType) {
+		final FlatFileItemWriter<EcpOutputRecordSalesForce> fileItemWriter = new FlatFileItemWriter<>();
+		fileItemWriter.setResource(new FileSystemResource(filePath + BatchConstants.OUTPUT_FILE_SALES + resultType.outputFilePostfix()));
+
+		fileItemWriter.setShouldDeleteIfExists(true);
+		fileItemWriter.setHeaderCallback(new ECPFileHeaderCallback(this.getSalesforceHeader()));
+		final DelimitedLineAggregator<EcpOutputRecordSalesForce> delLineAggregator = new DelimitedLineAggregator<>();
+		delLineAggregator.setDelimiter(ECPBatchConstant.PIPE);
+
+		final BeanWrapperFieldExtractor<EcpOutputRecordSalesForce> fieldExtractor = new BeanWrapperFieldExtractor<>();
+		if(ExecutionResultType.SUCCESS.equals(resultType)){
+			fieldExtractor.setNames(new String[]{ECPBatchConstant.MID, ECPBatchConstant.CUSTOMER_NAME,
+					ECPBatchConstant.OPPORTUNITY_NAME, ECPBatchConstant.COUNT_OF_ITM,
+					ECPBatchConstant.SUM_OF_ITM, ECPBatchConstant.DESCRIPTION});
+		}
+		delLineAggregator.setFieldExtractor(fieldExtractor);
+		fileItemWriter.setLineAggregator(delLineAggregator);
+		return fileItemWriter;
+	}
+
+	/**
+	 * Creates output file header.
+	 *
+	 * @return the header
+	 */
+	private String getHeader() {
+		final StringBuilder header = new StringBuilder(ECPBatchConstant.MID);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.STOCK);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.STOCK_VOLATILITY);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.GRANT_DATE);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.EXP_DATE);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.GRANT_TYPE);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.GRANT_PRICE);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.VESTED_QTY);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.ITM_VALUE);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.TIME_VALUE);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.BLACK_SCHOLES_VALUE);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.ITM_PERCENT);
+		return header.toString();
+	}
+
+	/**
+	 * Creates output file header.
+	 *
+	 * @return the header
+	 */
+	private String getSalesforceHeader() {
+		final StringBuilder header = new StringBuilder(ECPBatchConstant.MID);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.CUSTOMER_NAME);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.OPPORTUNITY_NAME);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.COUNT_OF_ITM);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.SUM_OF_ITM);
+		header.append(ECPBatchConstant.PIPE);
+		header.append(ECPBatchConstant.DESCRIPTION);
+		return header.toString();
+	}
+
+	@Bean
+	public DataSource dataSource() {
+		EmbeddedDatabaseBuilder builder = new EmbeddedDatabaseBuilder();
+		return builder.setType(EmbeddedDatabaseType.H2)
+				.addScript("classpath:org/springframework/batch/core/schema-drop-h2.sql")
+				.addScript("classpath:org/springframework/batch/core/schema-h2.sql")
+				.build();
+	}
+
+	@Bean(name = "transactionManager")
+	public PlatformTransactionManager getTransactionManager() {
+		return new ResourcelessTransactionManager();
+	}
+
+	@Bean(name = "jobRepository")
+	public JobRepository getJobRepository() throws Exception {
+		JobRepositoryFactoryBean factory = new JobRepositoryFactoryBean();
+		factory.setDataSource(dataSource());
+		factory.setTransactionManager(getTransactionManager());
+		factory.afterPropertiesSet();
+		return factory.getObject();
+	}
+
+	@Bean(name = "jobLauncher")
+	public JobLauncher getJobLauncher() throws Exception {
+		TaskExecutorJobLauncher jobLauncher = new TaskExecutorJobLauncher();
+		jobLauncher.setJobRepository(getJobRepository());
+		jobLauncher.afterPropertiesSet();
+		// JobParameters jobParameters = new JobParametersBuilder()
+		// 		.addString("jobID", String.valueOf(System.currentTimeMillis()))
+		// 		.addString("RUN_TYPE_CODES", "hsa").toJobParameters();
+	    // jobLauncher.run(this.ecpBatch(getJobRepository(), getTransactionManager()), jobParameters);
+		return jobLauncher;
+	}
+}
